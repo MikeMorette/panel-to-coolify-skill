@@ -1,0 +1,4 @@
+interface:
+  display_name: "Panel to Coolify Migration"
+  short_description: "Safely migrate FastPanel, cPanel, Plesk, and ISPmanager servers to Coolify"
+  default_prompt: "Safely inventory this server, snapshot configs, stage Coolify containers with zero downtime, and migrate traffic off the legacy control panel with automatic rollback."
