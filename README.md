@@ -1,59 +1,61 @@
-# Panel-to-Coolify Safe Migration Skill
+# Panel-to-Coolify — Безопасный AI-скилл для миграции серверов
 
-A production-hardened, cross-agent **AI Skill** for migrating live servers from **FastPanel / FastPanel2**, **cPanel / WHM**, **Plesk**, and **ISPmanager** to **Coolify** — engineered with strict isolation, zero-downtime shadow staging, automatic dead-man's rollback, and token/SSH efficiency.
+> **Русский (README.md)** | **[English (README_EN.md)](./README_EN.md)**
 
-Follows the open **Agent Skills (`SKILL.md`)** specification and works with **Claude Code, OpenAI Codex, Cursor, Gemini CLI, OpenCode, Antigravity**, and any Agent-Skills-compatible assistant.
+Универсальный, отказоустойчивый **AI-скилл** для переноса живых боевых серверов с панелей управления **FastPanel / FastPanel2**, **cPanel / WHM**, **Plesk** и **ISPmanager** на **Coolify** — со строгой изоляцией действий ИИ, теневым staging без простоя, автоматическим откатом (dead-man's rollback) и экономией токенов/SSH-вызовов.
+
+Скилл соответствует открытому стандарту **Agent Skills (`SKILL.md`)** и совместим с **Claude Code, OpenAI Codex, Cursor, Gemini CLI, OpenCode, Antigravity** и любыми другими ИИ-ассистентами.
 
 ---
 
-## Why This Skill Exists
+## Зачем нужен этот скилл
 
-Letting an AI agent run commands directly on a live production server is risky if it wings ad-hoc shell commands. This skill turns server migration into a **5-phase guarded state machine** with hard-coded blast-radius limits:
+Пускать ИИ-ассистента по SSH на боевой сервер с произвольными bash-командами опасно. Этот скилл ограничивает действия ИИ **строгой 5-фазной state-машиной** и зашитыми в скрипты предохранителями:
 
-1. **Read-Only Preflight (`scripts/preflight-inventory.sh`)**
-   - Single batched SSH script (zero mutations).
-   - Auto-detects `fastpanel2`, `cpanel`, `plesk`, or `ispmanager`, active web/DB/mail/FTP services, `forever`/`pm2`/systemd workers, SSL panel dependencies, local Git/build drift (`dist/` vs repo), and **live DNS vs dead/parked domains** (preventing Let's Encrypt rate limits).
-2. **Mandatory Immutable Snapshot (`scripts/backup-state.sh`)**
-   - Verifies disk headroom (`>= 5 GB` and `>= 15%` free).
-   - Archives `/etc/nginx`, `/etc/apache2`, `/etc/httpd`, `/etc/php*`, `/etc/letsencrypt`, panel configs, cron jobs, systemd units, firewall rules, and package manifests into `/var/backups/coolify-migration-<TS>/` + `MANIFEST.env`.
-3. **Shadow Staging & Decoupling (`scripts/stage-verify.sh`, `scripts/start-guard.js`)**
-   - Keeps host `:80`/`:443` untouched while decoupling SSL certs/ACME webroots into `/etc/nginx/ssl-certs/`.
-   - Stages static/SPA, PHP, and Node/Python containers on loopback (`127.0.0.1:1808x`).
-   - Enforces **single-instance execution** via `flock` + `start-guard.js` so `@Cron` jobs, mailers, and webhooks never run twice across old (`forever`/`pm2`) and new Coolify containers.
-4. **Atomic Cutover with Automatic Rollback (`scripts/cutover-and-rollback.sh`)**
-   - Requires `--dry-run` preview before `--apply`.
-   - Stops legacy workers and host HTTP (`nginx`/`apache2`/`httpd`/`php*-fpm`) right as `coolify-proxy` takes `:80/:443`.
-   - Runs live HTTPS probes across all active domains; **automatically rolls back** to the legacy stack from `MANIFEST.env` if any probe fails.
-5. **Gated Panel Cleanup (`scripts/purge-panel-safe.sh`)**
-   - Defaults to dry-run; refuses execution unless `--confirm-verified --apply` is supplied **and** 4 safety gates pass:
-     1. `coolify-proxy` is healthy and running.
-     2. Legacy host HTTP is stopped and `:80/:443` are active.
-     3. A fresh verification receipt (`< 24h`) exists from `stage-verify.sh`.
-     4. Zero Coolify configs reference panel directories.
+1. **Только чтение на старте (`scripts/preflight-inventory.sh`)**
+   - Выполняется **одним пакетным SSH-вызовом** без единого изменения на сервере.
+   - Автоматически определяет панель (`fastpanel2`, `cpanel`, `plesk`, `ispmanager`), активные веб/БД/почта/FTP-сервисы, процессы `forever`/`pm2`/`supervisor`, зависимости SSL от каталогов панели, расхождение локального кода на проде и Git (`git status`, `dist/`) и **проверяет живой DNS против мёртвых/парковочных доменов** (чтобы не словить rate-limit Let's Encrypt).
+2. **Обязательный снэпшот перед изменениями (`scripts/backup-state.sh`)**
+   - Проверяет запас места на диске (`>= 5 ГБ` и `>= 15%` свободно).
+   - Архивирует `/etc/nginx`, `/etc/apache2`, `/etc/httpd`, `/etc/php*`, `/etc/letsencrypt`, конфиги панелей, `cron`, `systemd`-юниты, правила фаервола и список пакетов в `/var/backups/coolify-migration-<TS>/` + формирует `MANIFEST.env`.
+3. **Теневой staging и защита от двойного запуска (`scripts/stage-verify.sh`, `scripts/start-guard.js`)**
+   - Не трогает публичные `:80`/`:443`, пока отвязывает SSL-сертификаты и ACME webroot-каталоги от панели в `/etc/nginx/ssl-certs/`.
+   - Поднимает контейнеры-кандидаты (статика/SPA, PHP, Node/Python API) строго на loopback (`127.0.0.1:1808x`).
+   - Оборачивает stateful API в `flock` + `start-guard.js`: старый процесс (`forever`/`pm2`) и новый контейнер Coolify **никогда не запустятся одновременно** (исключает дублирование `@Cron`, рассылок и вебхуков).
+4. **Атомарный cutover с автооткатом (`scripts/cutover-and-rollback.sh`)**
+   - Требует `--dry-run` предпросмотра перед `--apply`.
+   - Останавливает легаси-воркеры и хостовый HTTP (`nginx`/`apache2`/`httpd`/`php*-fpm`) ровно в момент старта `coolify-proxy` на `:80/:443`.
+   - Прогоняет живые HTTPS-пробы по всем активным доменам; если любая критичная проверка падает — **автоматически откатывает сервер** обратно к старому веб-стеку из `MANIFEST.env`.
+5. **Шлюзованное удаление панели (`scripts/purge-panel-safe.sh`)**
+   - По умолчанию работает в режиме `dry-run`; отказывается выполнять очистку без флагов `--confirm-verified --apply` и прохождения **4 обязательных проверок**:
+     1. Контейнер `coolify-proxy` запущен и работает.
+     2. Легаси-HTTP остановлен, а `:80/:443` обслуживаются прокси.
+     3. Есть свежий файл подтверждения проверки (`< 24 часов`) от `stage-verify.sh`.
+     4. В конфигах Coolify (`/data/coolify/`) не осталось ни одной ссылки на каталоги панели.
 
-### Hard Protected Resources (Never Touched)
+### Жёсткий список защищённых ресурсов (неприкосновенны)
 
-All scripts enforce an allowlist protecting stateful infrastructure and user data:
-- **Databases**: `mysql`, `mysqld`, `mariadb`, `postgresql`, `redis`
-- **Mail**: `exim`, `exim4`, `postfix`, `dovecot`
+Все скрипты запрещают остановку, отключение или удаление критичной инфраструктуры и пользовательских данных:
+- **Базы данных**: `mysql`, `mysqld`, `mariadb`, `postgresql`, `redis`
+- **Почта**: `exim`, `exim4`, `postfix`, `dovecot`
 - **FTP**: `proftpd`, `pure-ftpd`, `vsftpd`
-- **Access & Firewall**: `sshd`, `ufw`, `iptables`, `nftables`
-- **Data & Certs**: `/var/www`, `/home/*/public_html`, `/var/vmail`, `/etc/letsencrypt`, `/etc/nginx/ssl-certs`
+- **Доступ и сеть**: `sshd`, `ufw`, `iptables`, `nftables`
+- **Данные и сертификаты**: `/var/www`, `/home/*/public_html`, `/var/vmail`, `/etc/letsencrypt`, `/etc/nginx/ssl-certs`
 
 ---
 
-## Installation (All AI Agents)
+## Установка (для любых ИИ-агентов)
 
-### Option 1: Universal CLI (`npx skills`)
+### Вариант 1: Универсальный CLI (`npx skills`)
 
 ```bash
 npx skills add MikeMorette/panel-to-coolify-skill
 ```
 
-### Option 2: Direct Clone for Specific Agents
+### Вариант 2: Прямое клонирование для нужного агента
 
 ```bash
-# Universal (.agents)
+# Универсальный путь (.agents)
 git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.agents/skills/panel-to-coolify
 
 # Claude Code
@@ -66,44 +68,45 @@ git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.codex/ski
 git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.gemini/skills/panel-to-coolify
 ```
 
-Or drop it into any project under `.agents/skills/panel-to-coolify/`.
+Либо положите репозиторий прямо в проект в папку `.agents/skills/panel-to-coolify/`.
 
 ---
 
-## Quick Start Prompt
+## Быстрый старт (пример промпта)
 
-Once installed, give your AI assistant a prompt like:
+После установки отправьте вашему ИИ-ассистенту:
 
 ```text
-Use the panel-to-coolify skill to migrate server root@203.0.113.10 (SSH key ~/.ssh/prod_key)
-from FastPanel2 to Coolify. Start with Phase 1 read-only preflight and Phase 2 backup,
-and show me the migration plan before making any changes.
+Используй скилл panel-to-coolify для миграции сервера root@203.0.113.10 (ключ ~/.ssh/prod_key)
+с FastPanel2 на Coolify. Начни с Фазы 1 (read-only preflight) и Фазы 2 (бэкап),
+и покажи мне план миграции до внесения любых изменений.
 ```
 
 ---
 
-## Repository Structure
+## Структура репозитория
 
 ```text
 .
-├── SKILL.md                          # Core state machine & agent guardrails
+├── SKILL.md                          # Основная state-машина и правила безопасности для ИИ
 ├── agents/
-│   └── openai.yaml                   # Codex / OpenAI agent metadata
+│   └── openai.yaml                   # Метаданные для Codex / OpenAI
 ├── scripts/
-│   ├── preflight-inventory.sh        # Phase 1: read-only multi-panel & DNS audit
-│   ├── backup-state.sh               # Phase 2: immutable config/SSL/firewall snapshot
-│   ├── start-guard.js                # Phase 3: single-instance TCP port guard
-│   ├── stage-verify.sh               # Phase 3 & 5: loopback/live HTTPS, TLS, SPA, upload check
-│   ├── cutover-and-rollback.sh       # Phase 4: atomic traffic switch + dead-man's rollback
-│   └── purge-panel-safe.sh           # Phase 5: 4-gate protected panel cleanup
+│   ├── preflight-inventory.sh        # Фаза 1: read-only аудит панелей, портов, DNS и git
+│   ├── backup-state.sh               # Фаза 2: неизменяемый снэпшот конфигов, SSL и firewall
+│   ├── start-guard.js                # Фаза 3: защита от двойного запуска по TCP-порту
+│   ├── stage-verify.sh               # Фазы 3 и 5: проверка loopback/live HTTPS, TLS, SPA, uploads
+│   ├── cutover-and-rollback.sh       # Фаза 4: атомарное переключение и автооткат
+│   └── purge-panel-safe.sh           # Фаза 5: 4-ступенчатая безопасная очистка панели
 ├── references/
-│   ├── panels-matrix.md              # FastPanel2, cPanel, Plesk, ISPmanager paths & quirks
-│   ├── safety-invariants.md          # Non-negotiable production safety rules
-│   └── coolify-templates.md          # Traefik, Nginx, Certbot, flock, and panel-tools YAML
-├── README.md
+│   ├── panels-matrix.md              # Матрица путей и особенностей FastPanel2, cPanel, Plesk, ISPmanager
+│   ├── safety-invariants.md          # Неприкосновенные правила продакшен-безопасности
+│   └── coolify-templates.md          # Шаблоны Traefik, Nginx, Certbot, flock и panel-tools
+├── README.md                         # Документация (на русском)
+├── README_EN.md                      # Документация (на английском)
 └── LICENSE                           # MIT
 ```
 
-## License
+## Лицензия
 
 MIT
