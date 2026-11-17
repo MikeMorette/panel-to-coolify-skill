@@ -1,0 +1,3 @@
+[setup]
+# Python and local TLS fixtures verify the migration safety checks.
+check = ["bash tests/run.sh"]

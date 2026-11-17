@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * Single-instance port guard for migrated Node.js/API containers.
- * Verifies the target TCP port is completely free before spawning the child process,
- * preventing split-brain cron jobs, mailers, or webhook consumers during panel cutover.
+ * Advisory port check for migrated Node.js/API containers. The port is released
+ * before the child starts, so this cannot itself prevent a race or split-brain.
+ * Cross-process exclusion requires an independently verified shared lock used by
+ * every old and new writer; different network/filesystem namespaces matter.
  *
  * Usage:
  *   node start-guard.js --port 3000 [--host 127.0.0.1] [--timeout-ms 3000] -- node dist/main.js
@@ -37,6 +38,9 @@ function parseArgs(argv) {
     } else if (arg === '--help' || arg === '-h') {
       console.log('Usage: start-guard.js --port <port> [--host 0.0.0.0] [--timeout-ms 3000] -- <cmd> [args...]');
       process.exit(0);
+    } else {
+      console.error(`[start-guard] Unknown or incomplete option: ${arg}`);
+      process.exit(2);
     }
   }
 
@@ -81,8 +85,13 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`[start-guard] Port ${host}:${port} verified free. Starting: ${cmd} ${args.join(' ')}`);
+  console.log(`[start-guard] Port ${host}:${port} was free at the time of the check. Starting child.`);
   const child = spawn(cmd, args, { stdio: 'inherit' });
+
+  child.on('error', (err) => {
+    console.error(`[start-guard] Unable to start child (${err.code || 'spawn error'}).`);
+    process.exitCode = 1;
+  });
 
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.on(sig, () => {
@@ -92,6 +101,7 @@ async function main() {
 
   child.on('exit', (code, signal) => {
     if (signal) {
+      process.removeAllListeners(signal);
       process.kill(process.pid, signal);
     } else {
       process.exit(code === null ? 1 : code);

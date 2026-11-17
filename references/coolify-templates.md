@@ -1,164 +1,21 @@
-# Coolify & Hardened Container Templates
+# Coolify routing and renewal notes
 
-Generic, panel-agnostic production templates validated on live migrations. Replace `example.com`, `198.51.100.10`, and service names with values discovered in Phase 1.
+These are design checks, not drop-in production configurations. Inspect the installed Coolify/Traefik version, existing entrypoint names, networks, routing priorities, trusted headers and certificates first.
 
-## 1. Traefik Dynamic Routing (`/data/coolify/proxy/dynamic/migration.yml`)
+## Existing applications and host upstreams
 
-Terminates TLS using decoupled certs under `/etc/nginx/ssl-certs/`, routes ACME challenges cleanly, and forwards traffic to containerized sites (`nginx-sites`) or Coolify API containers while preserving real client headers.
+Prefer an already-running Coolify workload when it serves the intended version. Route the desired hostname to that exact workload or to a reviewed internal host bridge; do not rebuild merely to change a domain. Apache can remain a loopback upstream for `.htaccess`/PHP sites. Restrict internal listeners to the expected proxy peer, and verify client-IP and forwarded-header trust instead of accepting spoofable headers.
 
-```yaml
-http:
-  routers:
-    acme-well-known:
-      rule: "PathPrefix(`/.well-known/acme-challenge/`)"
-      entryPoints:
-        - http
-      priority: 1000
-      service: sites-http
+Validate both HTTP and HTTPS/redirect behavior, actual Host and SNI, paths, WebSockets and HTTP/3/UDP if used. A route may intentionally be disabled. Preserve its prior status rather than automatically enabling it. Check Punycode and Unicode names as the same domain where appropriate, including certificates and Coolify's duplicate-domain checks.
 
-    site-example-https:
-      rule: "Host(`example.com`) || Host(`www.example.com`)"
-      entryPoints:
-        - https
-      tls: {}
-      service: sites-http
+## Config source of truth
 
-    api-example-https:
-      rule: "Host(`api.example.com`)"
-      entryPoints:
-        - https
-      tls: {}
-      service: api-example
+Coolify can store its proxy configuration and rewrite `/data/coolify/proxy/docker-compose.yml` on a start or restart. Use the supported Coolify UI/API to save desired proxy configuration, compare it to the current compose and Docker inspection, and preserve required custom mounts, networks and addresses. Saving should not implicitly restart a production proxy. Validate any Coolify normalization of the saved configuration before relying on recreation.
 
-  services:
-    sites-http:
-      loadBalancer:
-        passHostHeader: true
-        servers:
-          - url: "http://host.docker.internal:18080"
+## TLS and renewal
 
-    api-example:
-      loadBalancer:
-        passHostHeader: true
-        servers:
-          - url: "http://host.docker.internal:3000"
+Map each certificate lineage to its SANs, public DNS, challenge entrypoint, files visible inside Traefik and reload/publish process. Avoid file mounts that permanently bind an old symlink target when Certbot rotates generations; mount an appropriate directory, keep keys read-only to the proxy, and verify the certificate actually served by SNI. Use staging ACME for safe issuance tests and avoid unnecessary production reissuance. Handle scheduled renewal, partial failure, concurrent jobs, process termination, rotation and proxy recreation. A timer that ran when nothing was due proves only a no-op.
 
-tls:
-  certificates:
-    - certFile: /etc/nginx/ssl-certs/group1-letsencrypt/live/example.com/fullchain.pem
-      keyFile: /etc/nginx/ssl-certs/group1-letsencrypt/live/example.com/privkey.pem
-```
+## Workers
 
-Make sure `/etc/nginx/ssl-certs` is mounted read-only into `coolify-proxy` (`/etc/nginx/ssl-certs:/etc/nginx/ssl-certs:ro`).
-
-## 2. Hardened Nginx Stage/Sites Container (`/data/coolify/sites-nginx/default.conf`)
-
-Binds to `127.0.0.1:18080` on the host, handles ACME HTTP-01 challenges, SPA fallback, uploads, and optional Apache `.htaccess` passthrough:
-
-```nginx
-server {
-    listen 80;
-    server_name example.com www.example.com;
-
-    location ^~ /.well-known/acme-challenge/ {
-        alias /etc/nginx/ssl-certs/group1-acme-challenge/.well-known/acme-challenge/;
-        default_type "text/plain";
-        try_files $uri =404;
-    }
-
-    root /var/www/appuser/data/www/example.com;
-    index index.html index.htm;
-
-    location /uploads/ {
-        alias /var/www/appuser/data/www/example.com/uploads/;
-        try_files $uri =404;
-    }
-
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-}
-```
-
-## 3. Single-Instance Guard for Stateful APIs (`docker-compose.yml` + `flock` + `start-guard.js`)
-
-Prevents duplicate cron jobs/mailers/webhooks when migrating from `forever`, `pm2`, or `systemd`:
-
-```yaml
-services:
-  api:
-    image: node:20-alpine
-    container_name: example-api
-    restart: unless-stopped
-    network_mode: host
-    working_dir: /app
-    volumes:
-      - /var/www/appuser/data/www/api.example.com:/app
-      - /var/www/appuser/data/www/api.example.com/uploads:/app/uploads
-      - /run/coolify-api-locks:/run/coolify-api-locks
-      - /usr/local/lib/coolify-guards/start-guard.js:/usr/local/bin/start-guard.js:ro
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        mkdir -p /run/coolify-api-locks && \
-        exec flock -n /run/coolify-api-locks/example-api.lock \
-        node /usr/local/bin/start-guard.js --port 3000 -- node dist/main.js
-```
-
-## 4. Decoupled Certbot Auto-Renewal (`certbot/certbot` + `systemd .path`)
-
-Run periodic certbot renewal via cron/timer and automatically reload containers only when certificates actually change:
-
-```ini
-# /etc/systemd/system/nginx-ssl-reload.path
-[Unit]
-Description=Watch decoupled SSL certs for renewal
-
-[Path]
-PathChanged=/etc/nginx/ssl-certs/group1-letsencrypt/archive
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/nginx-ssl-reload.service
-[Unit]
-Description=Reload sites nginx and touch Traefik dynamic config after SSL renewal
-
-[Service]
-Type=oneshot
-ExecStart=/usr/bin/docker exec sites-nginx nginx -s reload
-ExecStart=/usr/bin/touch /data/coolify/proxy/dynamic/migration.yml
-```
-
-## 5. Hardened `panel-tools` (Optional Roundcube + phpMyAdmin on `:8888`)
-
-If users still rely on host `mysql` + `exim`/`dovecot`, bind `panel-tools` to `127.0.0.1:8888` (access via SSH tunnel) or protect `:8888` via firewall allowlist:
-
-```yaml
-services:
-  panel-tools-nginx:
-    image: nginx:1.27-alpine
-    ports:
-      - "127.0.0.1:8888:80"
-    depends_on:
-      - phpmyadmin
-      - roundcube
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-
-  phpmyadmin:
-    image: phpmyadmin:5.2
-    environment:
-      PMA_SOCKET: /var/run/mysqld/mysqld.sock
-    volumes:
-      - /run/mysqld:/var/run/mysqld:ro
-
-  roundcube:
-    image: roundcube/roundcubemail:1.6-apache
-    environment:
-      ROUNDCUBEMAIL_DEFAULT_HOST: tls://127.0.0.1
-      ROUNDCUBEMAIL_SMTP_SERVER: tls://127.0.0.1
-```
+An advisory TCP port check is not a distributed lock: the socket is released before the application binds. A shared `flock` only helps when all old and new writers take the **same** lock across the relevant filesystem/container namespaces and hold it for the full lifecycle. Otherwise, explicitly stop and verify the previous writer before starting its replacement and prepare its restoration.
