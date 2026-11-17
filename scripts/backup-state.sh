@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Immutable configuration, SSL, cron, firewall, and service manifest snapshot before migration.
-# Does NOT stop or mutate any live service.
+# Optional configuration/SSL snapshot. It contains secrets and is not a full
+# server or database backup. Run only when the user authorizes these paths.
 
 set -euo pipefail
+umask 077
 
 ALLOW_LOW_DISK=0
 BACKUP_ROOT="/var/backups"
@@ -64,7 +65,9 @@ for p in "${CANDIDATE_PATHS[@]}"; do
 done
 
 if [ "${#EXISTING[@]}" -gt 0 ]; then
-  tar -czpf "${BACKUP_DIR}/configs-and-ssl.tar.gz" "${EXISTING[@]}" 2>/dev/null || true
+  # Do not claim success after a partial or unreadable archive.
+  tar -czpf "${BACKUP_DIR}/configs-and-ssl.tar.gz" "${EXISTING[@]}"
+  tar -tzf "${BACKUP_DIR}/configs-and-ssl.tar.gz" >/dev/null
 fi
 
 # Capture runtime state & firewall rules
@@ -72,8 +75,9 @@ ss -tlnp > "${BACKUP_DIR}/listening-ports.txt" 2>/dev/null || true
 systemctl list-units --type=service --state=running > "${BACKUP_DIR}/running-services.txt" 2>/dev/null || true
 (ufw status verbose 2>/dev/null || iptables-save 2>/dev/null || nft list ruleset 2>/dev/null || true) > "${BACKUP_DIR}/firewall-rules.txt"
 (dpkg -l 2>/dev/null || rpm -qa 2>/dev/null || true) > "${BACKUP_DIR}/packages.txt"
-(forever list 2>/dev/null || true) > "${BACKUP_DIR}/forever-list.txt"
-(pm2 list 2>/dev/null || true) > "${BACKUP_DIR}/pm2-list.txt"
+# forever/pm2 listing commands can create state or start a daemon; do not run
+# them under a snapshot or read-only inventory. Record process names instead.
+ps -eo pid,ppid,user,comm > "${BACKUP_DIR}/processes.txt" 2>/dev/null || true
 
 # Detect active legacy web services for rollback automation
 ACTIVE_WEB_SERVICES=""

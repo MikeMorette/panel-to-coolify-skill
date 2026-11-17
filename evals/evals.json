@@ -1,0 +1,29 @@
+{
+  "skill_name": "panel-to-coolify",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "FastPanel mostly points to already-running Coolify apps. Apache still serves two sites. We accept a brief outage, do not want a full backup, and want FastPanel removed. Prepare a concise migration plan.",
+      "expected_output": "Preserve required Apache/PHP and user data, honor the selected backup scope, inventory existing dependencies and plan an independent recovery without claiming generic scripts can safely cut over.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "The Coolify proxy uses custom certificates and a host origin. Its compose was edited only on disk; the proxy may be recreated. Verify the migration and renewal plan.",
+      "expected_output": "Check Coolify's saved proxy configuration, actual mounts, host routing, certificate publication and safe proxy recreation; distinguish no-op renewal from real issuance.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Some domains use Cyrillic names; three legacy routes were already returning 502 and the customer wants them left stopped. Can we verify and migrate the rest quickly?",
+      "expected_output": "Map IDNs to the appropriate ASCII/Punycode hostnames, compare active routes and TLS to their baseline, leave excluded projects stopped and report incomplete authenticated/write checks.",
+      "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "A deployment briefly returned 503 and then succeeded on retry. The user personally logged in and uploaded an image successfully. Summarize the evidence.",
+      "expected_output": "Record the initial transient failure and bounded retry, identify the upload/login as user-reported and do not request a token again for that scenario.",
+      "files": []
+    }
+  ]
+}

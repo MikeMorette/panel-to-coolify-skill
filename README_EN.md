@@ -1,112 +1,62 @@
-# Panel-to-Coolify Safe Migration Skill
+# Panel-to-Coolify migration skill
 
-> **[Русский (README.md)](./README.md)** | **English (README_EN.md)**
+[Русский](README.md) | **English**
 
-A production-hardened, cross-agent **AI Skill** for migrating live servers from **FastPanel / FastPanel2**, **cPanel / WHM**, **Plesk**, and **ISPmanager** to **Coolify** — engineered with strict isolation, zero-downtime shadow staging, automatic dead-man's rollback, and token/SSH efficiency.
+This Agent Skill helps an AI assistant migrate a live server from FastPanel, cPanel/WHM, Plesk or ISPmanager to Coolify. It inventories dependencies, prepares routing and recovery checks, and guides panel retirement while preserving the services and data still in use. Compatible with Agent Skills clients including Codex and Claude Code.
 
-Follows the open **Agent Skills (`SKILL.md`)** specification and works with **Claude Code, OpenAI Codex, Cursor, Gemini CLI, OpenCode, Antigravity**, and any Agent-Skills-compatible assistant.
+Servers differ: a generic script cannot prove that package removal is safe or recover from an SSH failure. The bundled cutover and panel-removal helpers are **planning-only and refuse mutation**. Actual changes require a reviewed, tested plan tailored to the specific server.
 
----
-
-## Why This Skill Exists
-
-Letting an AI agent run commands directly on a live production server is risky if it wings ad-hoc shell commands. This skill turns server migration into a **5-phase guarded state machine** with hard-coded blast-radius limits:
-
-1. **Read-Only Preflight (`scripts/preflight-inventory.sh`)**
-   - Single batched SSH script (zero mutations).
-   - Auto-detects `fastpanel2`, `cpanel`, `plesk`, or `ispmanager`, active web/DB/mail/FTP services, `forever`/`pm2`/systemd workers, SSL panel dependencies, local Git/build drift (`dist/` vs repo), and **live DNS vs dead/parked domains** (preventing Let's Encrypt rate limits).
-2. **Mandatory Immutable Snapshot (`scripts/backup-state.sh`)**
-   - Verifies disk headroom (`>= 5 GB` and `>= 15%` free).
-   - Archives `/etc/nginx`, `/etc/apache2`, `/etc/httpd`, `/etc/php*`, `/etc/letsencrypt`, panel configs, cron jobs, systemd units, firewall rules, and package manifests into `/var/backups/coolify-migration-<TS>/` + `MANIFEST.env`.
-3. **Shadow Staging & Decoupling (`scripts/stage-verify.sh`, `scripts/start-guard.js`)**
-   - Keeps host `:80`/`:443` untouched while decoupling SSL certs/ACME webroots into `/etc/nginx/ssl-certs/`.
-   - Stages static/SPA, PHP, and Node/Python containers on loopback (`127.0.0.1:1808x`).
-   - Enforces **single-instance execution** via `flock` + `start-guard.js` so `@Cron` jobs, mailers, and webhooks never run twice across old (`forever`/`pm2`) and new Coolify containers.
-4. **Atomic Cutover with Automatic Rollback (`scripts/cutover-and-rollback.sh`)**
-   - Requires `--dry-run` preview before `--apply`.
-   - Stops legacy workers and host HTTP (`nginx`/`apache2`/`httpd`/`php*-fpm`) right as `coolify-proxy` takes `:80/:443`.
-   - Runs live HTTPS probes across all active domains; **automatically rolls back** to the legacy stack from `MANIFEST.env` if any probe fails.
-5. **Gated Panel Cleanup (`scripts/purge-panel-safe.sh`)**
-   - Defaults to dry-run; refuses execution unless `--confirm-verified --apply` is supplied **and** 4 safety gates pass:
-     1. `coolify-proxy` is healthy and running.
-     2. Legacy host HTTP is stopped and `:80/:443` are active.
-     3. A fresh verification receipt (`< 24h`) exists from `stage-verify.sh`.
-     4. Zero Coolify configs reference panel directories.
-
-### Hard Protected Resources (Never Touched)
-
-All scripts enforce an allowlist protecting stateful infrastructure and user data:
-- **Databases**: `mysql`, `mysqld`, `mariadb`, `postgresql`, `redis`
-- **Mail**: `exim`, `exim4`, `postfix`, `dovecot`
-- **FTP**: `proftpd`, `pure-ftpd`, `vsftpd`
-- **Access & Firewall**: `sshd`, `ufw`, `iptables`, `nftables`
-- **Data & Certs**: `/var/www`, `/home/*/public_html`, `/var/vmail`, `/etc/letsencrypt`, `/etc/nginx/ssl-certs`
-
----
-
-## Installation (All AI Agents)
-
-### Option 1: Universal CLI (`npx skills`)
+## Install
 
 ```bash
 npx skills add MikeMorette/panel-to-coolify-skill
 ```
 
-### Option 2: Direct Clone for Specific Agents
+Or clone into your agent's skill directory:
 
 ```bash
-# Universal (.agents)
 git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.agents/skills/panel-to-coolify
-
-# Claude Code
-git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.claude/skills/panel-to-coolify
-
-# OpenAI Codex
-git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.codex/skills/panel-to-coolify
-
-# Gemini CLI / Antigravity
-git clone https://github.com/MikeMorette/panel-to-coolify-skill.git ~/.gemini/skills/panel-to-coolify
 ```
 
-Or drop it into any project under `.agents/skills/panel-to-coolify/`.
+Example request:
 
----
+> Use `panel-to-coolify` to migrate my server. First inventory live routes and dependencies, respect my downtime and backup preferences, then prepare the cutover and panel retirement.
 
-## Quick Start Prompt
+## Workflow
 
-Once installed, give your AI assistant a prompt like:
+The fast path batches the minimum required checks into one or two SSH calls per phase. Repeated audits, heavyweight stages and extra subagents require a specific reason or a user request; once the conditions pass, proceed with the already authorized action.
 
-```text
-Use the panel-to-coolify skill to migrate server root@203.0.113.10 (SSH key ~/.ssh/prod_key)
-from FastPanel2 to Coolify. Start with Phase 1 read-only preflight and Phase 2 backup,
-and show me the migration plan before making any changes.
+1. Collect a compact baseline of routes, DNS, TLS, running services, applications and data paths; investigate missing dependencies.
+2. Agree on backup scope and a real recovery plan. Users can choose selected data or decline a full backup; communicate the resulting limitations. A configuration snapshot is not a database backup.
+3. Verify current workloads and certificate renewal, preserve intentionally stopped projects, and respect an authorized short outage or a request to avoid a heavyweight staging environment.
+4. Prepare and test server-specific cutover and independently controlled recovery, then compare public behavior to the baseline.
+5. Before removing a panel, review its dependencies, package maintainer scripts, conffiles, exact transaction and required Apache/PHP, mail, FTP, SSH, site files and application data.
+
+Zero downtime, universal support and business correctness from one HTTP response are not guaranteed. Unknown dependencies require investigation.
+
+## Scripts
+
+| Command | Purpose |
+|---|---|
+| `scripts/preflight-inventory.sh [--public-ip IP] [--dns-limit N] [--git-scan]` | Initial inventory with bounded DNS checks; does not invoke `pm2 list`/`forever list` or scan filesystem trees unless `--git-scan` is selected. |
+| `scripts/backup-state.sh` | Optional config/certificate snapshot containing secrets; use only with authorization for that scope. Not a full backup or database dump. |
+| `scripts/stage-verify.sh --domains example.com --target 127.0.0.1:443` | Route and TLS checks; verifies certificate identity/chain by default and does not follow redirects. |
+| `scripts/cutover-and-rollback.sh --dry-run ...` | Plan only. `--apply` and `--rollback` are refused because no independent watchdog is bundled. |
+| `scripts/purge-panel-safe.sh --panel fastpanel2` | Inventory and simulated package removal only. `--apply` is refused. |
+| `scripts/start-guard.js` | Advisory port check; it does not provide single-instance exclusion. |
+
+An explicitly requested `stage-verify.sh --write-receipt` records authenticated HTTPS route checks only. It is not proof of login, file writes or rollback, and does not authorize panel removal.
+
+Transient route errors receive bounded retries, with the initial failure retained in the output. A user's direct confirmation of a workflow is recorded as user-reported evidence without requesting a token for that same test.
+
+More detail: [safety invariants](references/safety-invariants.md), [panel notes](references/panels-matrix.md), [Coolify routing and certificates](references/coolify-templates.md).
+
+## Development checks
+
+```bash
+bash tests/run.sh
 ```
 
----
+Tests use local fixtures and do not contact a production server. Real cutover and recovery need separate verification.
 
-## Repository Structure
-
-```text
-.
-├── SKILL.md                          # Core state machine & agent guardrails
-├── agents/
-│   └── openai.yaml                   # Codex / OpenAI agent metadata
-├── scripts/
-│   ├── preflight-inventory.sh        # Phase 1: read-only multi-panel & DNS audit
-│   ├── backup-state.sh               # Phase 2: immutable config/SSL/firewall snapshot
-│   ├── start-guard.js                # Phase 3: single-instance TCP port guard
-│   ├── stage-verify.sh               # Phase 3 & 5: loopback/live HTTPS, TLS, SPA, upload check
-│   ├── cutover-and-rollback.sh       # Phase 4: atomic traffic switch + dead-man's rollback
-│   └── purge-panel-safe.sh           # Phase 5: 4-gate protected panel cleanup
-├── references/
-│   ├── panels-matrix.md              # FastPanel2, cPanel, Plesk, ISPmanager paths & quirks
-│   ├── safety-invariants.md          # Non-negotiable production safety rules
-│   └── coolify-templates.md          # Traefik, Nginx, Certbot, flock, and panel-tools YAML
-├── README.md                         # Documentation (Russian)
-├── README_EN.md                      # Documentation (English)
-└── LICENSE                           # MIT
-```
-
-## License
-
-MIT
+License: [MIT](LICENSE).
